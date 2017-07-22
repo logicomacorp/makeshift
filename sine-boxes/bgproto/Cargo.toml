@@ -1,0 +1,9 @@
+[package]
+name = "bgproto"
+version = "0.1.0"
+authors = ["ferris <yupferris@gmail.com>"]
+
+[dependencies]
+minifb = "0.9.1"
+time = "0.1"
+image = "*"
