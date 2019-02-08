@@ -23,6 +23,10 @@ entry:
     //  should be fine.
     sei
 
+    // Place @ character at end of screen (we'll use this as a progress indicator)
+    lda #$00
+    sta $0400 + 999
+
     // Copy 8kb block starting at the packed data to $8000-$9fff in 32 256-byte chunks
     ldy #$00
     ldx #$20
@@ -52,259 +56,340 @@ reloc_block_store_instr:
     //  $fb-$fe (unused)
     //  $ff (only used during fp -> string conversion)
 
-    .const table_base = $c000
+    .const initial_predictions = 110
 
-    .const table_offset_low = table_base
-    .const table_offset_high = table_base + $30
-    .const table_additional_bits = table_base + $60
+    .const match_len_bits = 8
+    .const match_offset_bits = 11
+    .const literal_bits = 8
 
-    .const length_table_offset_low = table_offset_low
-    .const length_table_offset_high = table_offset_high
-    .const length_table_additional_bits = table_additional_bits
+    .const contexts = $c000
 
-    .const distance_table_offset_low = table_offset_low + $10
-    .const distance_table_offset_high = table_offset_high + $10
-    .const distance_table_additional_bits = table_additional_bits + $10
+    .const num_match_len_contexts = 1 << match_len_bits
+    .const match_len_contexts = contexts
+    .const num_match_offset_contexts = 1 << match_offset_bits
+    .const match_offset_contexts = match_len_contexts + num_match_len_contexts
+    .const num_literal_contexts = 1 << literal_bits
+    .const literal_contexts = match_offset_contexts + num_match_offset_contexts
+    .const num_total_model_contexts = num_match_len_contexts + num_match_offset_contexts + num_literal_contexts
 
-    .const table_offset_low_temp = $92
-    .const table_offset_high_temp = $93
-    .const table_offset_add_low_temp = $94
-    .const table_offset_add_high_temp = $95
+    .const contexts_end = contexts + num_total_model_contexts
 
-    .const bit_buffer = $fb
-    .const bit_index = $fc
+    .const context = $92
+    .const context_low = $92
+    .const context_high = $93
 
-    .const backref_length_low = $92
-    .const backref_length_high = $93
+    .const decode_bits_contexts = $94
+    .const decode_bits_contexts_low = $94
+    .const decode_bits_contexts_high = $95
 
-    // These addr's have to be consecutive
-    .const backref_ptr_low = $fd
-    .const backref_ptr_high = $fe
+    .const output = $96
+    .const output_low = $96
+    .const output_high = $97
 
-    .const read_bit_temp = $02
+    .const input = $a3
+    .const input_low = $a3
+    .const input_high = $a4
 
-    .const read_n_bit_value_low = $a3
-    .const read_n_bit_value_high = $a4
+    .const bit_buffer = $a5
+    .const bit_buffer_pos = $a6
+
+    .const read_bits_count = $a7
+    .const read_bits_low = $a8
+    .const read_bits_high = $a9
+
+    .const x_low = $aa
+    .const x_high = $ab
+
+    .const symbol = $ac
+    .const bias = $ad
+    .const prediction = $ae
+
+    .const product_low = $af
+    .const product_high = $b0
+
+    .const context_bits_low = $f7
+    .const context_bits_high = $f8
+
+    .const offset = $f9
+    .const offset_low = $f9
+    .const offset_high = $fa
+    .const last_offset_low = $fb
+    .const last_offset_high = $fc
+    .const length = $fd
 
     .pc = * "decompressor and packed intro"
 decomp_start:
     .pseudopc reloc_addr {
 decomp_entry:
         // Expects y to be 0 on entry
-        sty bit_buffer
-        sty bit_index
+        lda #<packed_intro_start
+        sta input_low
+        lda #>packed_intro_start
+        sta input_high
+        lda #<uncompressed_start_addr
+        sta output_low
+        lda #>uncompressed_start_addr
+        sta output_high
 
-        // Decode table entries
-decomp_decode_table:
-            // Reset current offset add amount
-            ldx #$00
-            stx table_offset_add_high_temp
-            inx
-            stx table_offset_add_low_temp
+        // Load initial state
+        jsr decode_input_byte
+        sta x_low
+        jsr decode_input_byte
+        sta x_high
 
-            // if (i & 0x0f) == 0 then reset current offset to 1
-            tya
-            and #$0f
+        sty bit_buffer_pos
+
+        // Set up initial model predictions
+        lda #<contexts
+        sta context_low
+        lda #>contexts
+        sta context_high
+initial_predictions_loop:
+            lda #initial_predictions
+            sta (context), y
+            inc context_low
             bne !+
-                sta table_offset_high_temp
-                txa
-                sta table_offset_low_temp
+                inc context_high
+!:      lda context_low
+        cmp #<contexts_end
+        bne initial_predictions_loop
+        lda context_high
+        cmp #>contexts_end
+        bne initial_predictions_loop
 
-            // Read additional bit count
-!:          lda #$04
-            jsr decomp_read_n_bit_value
+packet_loop:
+            // Progress indicator
+            inc $d800 + 999
 
-            // Store additional bit count into table
-            sta table_additional_bits, y
+            lda #<match_len_contexts
+            sta decode_bits_contexts_low
+            lda #>match_len_contexts
+            sta decode_bits_contexts_high
+            lda #match_len_bits
+            jsr decode_read_bits
+            beq literal
 
-            // Shift current offset add amount (should be 1) by number of additional bits
-            tax
-            beq decomp_decode_table_store_and_add
-!:              asl table_offset_add_low_temp
-                rol table_offset_add_high_temp
-            dex
-            bne !-
+match:
+            sta length
 
-            // Store current offset into tables, and add shifted amount
-decomp_decode_table_store_and_add:
-            lda table_offset_low_temp
-            sta table_offset_low, y
+            lda #<match_offset_contexts
+            sta decode_bits_contexts_low
+            lda #>match_offset_contexts
+            sta decode_bits_contexts_high
+            lda #match_offset_bits
+            jsr decode_read_bits
+
+            lda read_bits_low
+            sta offset_low
+            lda read_bits_high
+            sta offset_high
+
+            bne !+
+            lda offset_low
+            bne !+
+                lda last_offset_low
+                sta offset_low
+                lda last_offset_high
+                sta offset_high
+!:          lda offset_low
+            sta last_offset_low
+            lda offset_high
+            sta last_offset_high
+
+            sec
+            lda output_low
+            sbc offset_low
+            sta offset_low
+            lda output_high
+            sbc offset_high
+            sta offset_high
+
+match_copy_loop:
+                lda (offset), y
+                jsr decode_write_byte
+                inc offset_low
+                bne !+
+                    inc offset_high
+!:          dec length
+            bne match_copy_loop
+
+            jmp next_packet
+
+literal:
+            lda #<literal_contexts
+            sta decode_bits_contexts_low
+            lda #>literal_contexts
+            sta decode_bits_contexts_high
+            lda #literal_bits
+            jsr decode_read_bits
+            jsr decode_write_byte
+
+next_packet:
+            lda output_low
+            cmp #<uncompressed_intro_end
+            bne !+
+            lda output_high
+            cmp #>uncompressed_intro_end
+            bne !+
+                jmp intro_entry
+!:          jmp packet_loop
+
+        // outputs read low bits in a, expects y = 0 and contexts in decode_bits_contexts, clobbers a
+decode_read_bits:
+        sta read_bits_count
+        sty read_bits_low
+        sty read_bits_high
+        sty context_bits_low
+        sty context_bits_high
+        inc context_bits_low
+
+read_bits_loop:
             clc
-            adc table_offset_add_low_temp
-            sta table_offset_low_temp
-            lda table_offset_high_temp
-            sta table_offset_high, y
-            adc table_offset_add_high_temp
-            sta table_offset_high_temp
-        iny
-        cpy #$30
-        bne decomp_decode_table
+            lda decode_bits_contexts_low
+            adc context_bits_low
+            sta context_low
+            lda decode_bits_contexts_high
+            adc context_bits_high
+            sta context_high
+            jsr decode_bit
+            php
+            rol read_bits_low
+            rol read_bits_high
+            plp
+            rol context_bits_low
+            rol context_bits_high
+        dec read_bits_count
+        bne read_bits_loop
 
-        // Reset y, as the rest of the decompressor assumes its value is always 0
-        ldy #$00
+        lda read_bits_low
 
-decomp_packet:
-            // Read packet bit
-            jsr decomp_read_bit
-
-            beq decomp_literal
-                // Backreference
-
-                // Read length
-                //  Read length index
-                jsr decomp_read_unary
-                //  Read additional bits
-                pha
-                lda length_table_additional_bits, x
-                jsr decomp_read_n_bit_value
-                //  Add offset to additional bits, and store in backref_length
-                pla
-                tax
-                lda length_table_offset_low, x
-                clc
-                adc read_n_bit_value_low
-                sta backref_length_low
-                lda length_table_offset_high, x
-                adc read_n_bit_value_high
-                sta backref_length_high
-
-                // Read distance
-                //  Read distance index
-                jsr decomp_read_unary
-                //  if length == 1 add 16 to distance index
-                cpy backref_length_high
-                bne !+
-                ldx backref_length_low
-                dex
-                bne !+
-                    clc
-                    adc #$10
-                //  Subtract table offset from current output pointer and store into backref_ptr
-!:              tax
-                lda decomp_write_instr + 1
-                sec
-                sbc distance_table_offset_low, x
-                sta backref_ptr_low
-                lda decomp_write_instr + 2
-                sbc distance_table_offset_high, x
-                sta backref_ptr_high
-
-                //  Read additional bits
-                lda distance_table_additional_bits, x
-                jsr decomp_read_n_bit_value
-                //  Subtract additional bits from backref_ptr
-                lda backref_ptr_low
-                sec
-                sbc read_n_bit_value_low
-                sta backref_ptr_low
-                lda backref_ptr_high
-                sbc read_n_bit_value_high
-                sta backref_ptr_high
-
-                // Copy backref_length bytes from backref_ptr to output
-                ldx backref_length_low
-decomp_copy_bytes:
-                    // Copy and output byte
-                    lda (backref_ptr_low), y
-                    jsr decomp_write_byte
-
-                    // Increment backref_ptr
-                    inc backref_ptr_low
-                    bne !+
-                        inc backref_ptr_high
-
-                // Decrement backref_length
-                //  Unfortunately, dex doesn't set carry, so we have to detect it ourselves manually
-!:              cpx #$00
-                bne !+
-                    dec backref_length_high
-!:              dex
-
-                // Check backref_length for 0. If we're not 0, copy some more bytes
-                bne decomp_copy_bytes
-                cpy backref_length_high
-                bne decomp_copy_bytes
-                beq decomp_next // Logically this should be jmp, but beq is equivalent here (due to cpy above) and 1 byte smaller
-
-decomp_literal:
-                // Literal
-                //  Read byte
-                tya
-                ldx #$08
-!:                  asl
-                    sta read_bit_temp
-                    jsr decomp_read_bit
-                    ora read_bit_temp
-                dex
-                bne !-
-
-                jsr decomp_write_byte
-
-decomp_next:
-        lda decomp_write_instr + 1
-        cmp #<uncompressed_intro_end
-        bne !+
-        lda decomp_write_instr + 2
-        cmp #>uncompressed_intro_end
-        bne !+
-        jmp intro_entry
-
-!:      jmp decomp_packet
-
-        // Ensures n and z flags are set along with returning the bit in a
-decomp_read_bit:
-        lda bit_index
-        and #$07
-        bne !+
-decomp_read_instr:
-            lda packed_intro_start
-            sta bit_buffer
-
-            inc decomp_read_instr + 1
-            bne !+
-                inc decomp_read_instr + 2
-!:      lda bit_buffer
-        lsr bit_buffer
-        inc bit_index
-        and #$01
         rts
 
-        // Reads unary value into a and x
-decomp_read_unary:
-        ldx #$00
-!:          jsr decomp_read_bit
-        bne !+
-            inx
-        bne !- // Logically this should be jmp, but bne is equivalent here (due to inx before) and 1 byte smaller
-!:      txa
-        rts
+        // outputs bit in carry, expects y = 0, clobbers a and x
+decode_bit:
+        sty symbol
 
-        // Expects number of bits to read in a
-        //  Reads into read_n_bit_value_low/high, and leaves read_n_bit_value_low in a
-        //  Does not _expect_ y to be zero since it's also called when decoding the table, but doesn't touch y either
-decomp_read_n_bit_value:
-        ldx #$00
-        stx read_n_bit_value_low
-        stx read_n_bit_value_high
-        tax
-        beq decomp_read_n_bit_value_done
-!:          asl read_n_bit_value_low
-            rol read_n_bit_value_high
-            jsr decomp_read_bit
-            ora read_n_bit_value_low
-            sta read_n_bit_value_low
+        lda (context), y
+        sta prediction
+
+        cmp x_low
+        bcc bit_0
+        beq bit_0
+
+bit_1:
+        sec
+        tya
+        sbc prediction
+        lsr
+        lsr
+        lsr
+        lsr
+        bne !+
+            lda #$01
+!:      clc
+        adc prediction
+        bne !+
+            lda #$ff
+!:      sta (context), y
+
+        sty bias
+        inc symbol
+        jmp update_state
+
+bit_0:
+        lsr
+        lsr
+        lsr
+        lsr
+        bne !+
+            lda #$01
+!:      sta bias // use bias as temp here; we'll overwrite it shortly
+        lda prediction
+        sec
+        sbc bias
+        bne !+
+            lda #$01
+!:      sta (context), y
+
+        lda prediction
+        sta bias
+        sec
+        tya
+        sbc prediction
+        sta prediction
+
+update_state:
+        // product = x_high * prediction (clobbers x_high)
+        tya
+        ldx #$08
+        clc
+m0:     bcc m1
+        clc
+        adc prediction
+m1:     ror
+        ror x_high
         dex
-        bne !-
-decomp_read_n_bit_value_done:
+        bpl m0
+        sta product_high
+        lda x_high
+
+        // add back state low bits
+        clc
+        adc x_low
+        sta product_low
+        tya
+        adc product_high
+        sta product_high
+
+        // subtract bias
+        sec
+        lda product_low
+        sbc bias
+        sta x_low
+        lda product_high
+        sbc #$00
+        sta x_high
+
+renormalize:
+        bmi renormalize_done
+            jsr decode_input_bit
+            rol x_low
+            rol x_high
+        bpl renormalize
+renormalize_done:
+
+        ror symbol
+
         rts
 
-decomp_write_byte:
-decomp_write_instr:
-        sta uncompressed_start_addr
+        // outputs bit in carry, expects y = 0, clobbers a
+decode_input_bit:
+        lda bit_buffer_pos
+        bne input_bit
+            jsr decode_input_byte
+            sta bit_buffer
+            lda #$08
+            sta bit_buffer_pos
+input_bit:
+        dec bit_buffer_pos
+        ror bit_buffer
+        rts
 
-        inc decomp_write_instr + 1
+        // outputs byte in a, expects y = 0
+decode_input_byte:
+        lda (input), y
+        inc input_low
         bne !+
-            inc decomp_write_instr + 2
+            inc input_high
+!:      rts
+
+        // writes byte in a, expects y = 0
+decode_write_byte:
+        sta (output), y
+
+        inc output_low
+        bne !+
+            inc output_high
 !:      rts
 
 packed_intro_start:
