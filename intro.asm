@@ -278,6 +278,22 @@ tab_bias_tab_high_instr_2:
     cpy #$13
     bne tab_bias_loop
 
+    // Clear out blank charset
+    ldy #$00
+blank_charset_clear_outer_loop:
+        ldx #$00
+        lda #$00
+blank_charset_clear_inner_loop:
+blank_charset_clear_write_instr:
+            sta $3800, x
+        inx
+        bne blank_charset_clear_inner_loop
+
+        inc blank_charset_clear_write_instr + 2
+    iny
+    cpy #$08
+    bne blank_charset_clear_outer_loop
+
     // Effect init
     lda #$01
     jsr fld_text_init_bg
@@ -339,6 +355,15 @@ mask_nmi:
 masked_nmi:
     rti*/
 
+    .pc = block_manipulation_interface "block manipulation interface"
+    jmp block_copy_bytes_impl
+    jmp block_write_byte_impl
+    jmp block_inc_read_addr_impl
+    jmp block_inc_write_addr_impl
+
+    .pc = music "music"
+    .import c64 "music.prg"
+
     .pc = * "block manipulation implementation"
     // Copies a bytes from block_read_addr to block_write_addr, and updates block_read_addr and block_write_addr. Assumes a is > 0, clobbers x & y
 block_copy_bytes_impl:
@@ -381,15 +406,6 @@ block_inc_write_addr_impl:
         inc block_write_addr_high
 !:  pla
     rts
-
-    .pc = block_manipulation_interface "block manipulation interface"
-    jmp block_copy_bytes_impl
-    jmp block_write_byte_impl
-    jmp block_inc_read_addr_impl
-    jmp block_inc_write_addr_impl
-
-    .pc = music "music"
-    .import c64 "music.prg"
 
     .pc = fld_text_code_base "fld text code"
     .import c64 "fld-text/fld-text.prg"
@@ -511,6 +527,3 @@ tab_bias_high_tab:
     .pc = * "store_s color table"
 store_s_coltab:
     .byte $0e, $03, $0d, $01, $0d, $01, $03, $04, $06, $00
-
-    .pc = $3800 "blank charset placeholder"
-    .fill $800, $00
