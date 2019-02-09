@@ -13,7 +13,7 @@ line_10:
 line_20:
     EndBasicProgram()
 
-    .const reloc_addr = $8000
+    .const reloc_addr = $3000
 
     .pc = * "stub entry"
 entry:
@@ -24,11 +24,10 @@ entry:
     sei
 
     // Place @ character at end of screen (we'll use this as a progress indicator)
-    lda #$00
-    sta $0400 + 999
+    ldy #$00
+    sty $0400 + 999
 
     // Copy 8kb block starting at the packed data to $8000-$9fff in 32 256-byte chunks
-    ldy #$00
     ldx #$20
 reloc_block_loop:
 reloc_block_load_instr:
@@ -60,10 +59,10 @@ reloc_block_store_instr:
 
     // All of these must be at least 8 (code assumes this for alignment reasons)
     .const match_len_bits = 8
-    .const match_offset_bits = 11
+    .const match_offset_bits = 12
     .const literal_bits = 8
 
-    .const contexts = $c000
+    .const contexts = $5000
 
     .const num_match_len_contexts = 1 << match_len_bits
     .const match_len_contexts = contexts
@@ -114,26 +113,26 @@ decomp_start:
 decomp_entry:
         // Expects y to be 0 on entry
 
-        // Load initial state
-        jsr decode_input_byte
+        // Load final coder state
+        .var final_coder_state = LoadBinary("final-coder-state.bin")
+        lda #(final_coder_state.get(0))
         sta x_low
-        jsr decode_input_byte
+        lda #(final_coder_state.get(1))
         sta x_high
 
         sty bit_buffer_pos
 
         // Set initial predictions in 256-byte chunks
+        lda #initial_predictions
         ldx #(num_total_model_contexts / 256)
-initial_predictions_loop:
-!:              lda #initial_predictions
 initial_predictions_store_instr:
-                sta contexts, y
+!:              sta contexts, y
             iny
             bne !-
 
             inc initial_predictions_store_instr + 2
         dex
-        bne initial_predictions_loop
+        bne !-
 
 packet_loop:
             // Progress indicator
@@ -239,14 +238,9 @@ bit_1:
             sec
             tya
             sbc prediction
-            lsr
-            lsr
-            lsr
-            lsr
-            bne !+
-                lda #$01
-!:          clc
-            adc (context), y
+            jsr calc_prediction_adjustment
+            clc
+            adc prediction
             bcc !+
                 lda #$ff
 !:          sta (context), y
@@ -260,14 +254,9 @@ bit_0:
             sta bias
 
             // Update model
-            lsr
-            lsr
-            lsr
-            lsr
-            bne !+
-                lda #$01
-!:          sta temp
-            lda (context), y
+            jsr calc_prediction_adjustment
+            sta temp
+            lda prediction
             sec
             sbc temp
             bne !+
@@ -314,20 +303,26 @@ m1:         ror
 
 renormalize:
             bmi renormalize_done
+renormalize_loop:
                 // Input bit
                 lda bit_buffer_pos
-                bne !+
-                    jsr decode_input_byte
-                    sta bit_buffer
+                bne read_bit
+decode_input_byte_load_instr:
+                    lda packed_intro_start
+                    inc decode_input_byte_load_instr + 1
+                    bne !+
+                        inc decode_input_byte_load_instr + 2
+!:                  sta bit_buffer
                     lda #$08
                     sta bit_buffer_pos
-!:              dec bit_buffer_pos
+read_bit:
+                dec bit_buffer_pos
                 ror bit_buffer
 
                 // Shift into state
                 rol x_low
                 rol x_high
-            bpl renormalize
+            bpl renormalize_loop
 renormalize_done:
 
             // Shift bit into read_bits and context
@@ -346,14 +341,14 @@ renormalize_done:
 
         rts
 
-        // outputs byte in a
-decode_input_byte:
-decode_input_byte_load_instr:
-        lda packed_intro_start
-
-        inc decode_input_byte_load_instr + 1
+        // Expects prediction in a
+calc_prediction_adjustment:
+        lsr
+        lsr
+        lsr
+        lsr
         bne !+
-            inc decode_input_byte_load_instr + 2
+            lda #$01
 !:      rts
 
         // writes byte in a

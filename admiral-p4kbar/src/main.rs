@@ -11,7 +11,7 @@ const INITIAL_PREDICTIONS: u32 = 110;
 const LEARNING_RATE: u32 = 4;
 
 const MATCH_LEN_BITS: u32 = 8;
-const MATCH_OFFSET_BITS: u32 = 11;
+const MATCH_OFFSET_BITS: u32 = 12;
 const LITERAL_BITS: u32 = 8;
 
 const NUM_MATCH_LEN_CONTEXTS: usize = 1 << MATCH_LEN_BITS;
@@ -44,8 +44,9 @@ fn main() {
 
     let input_file_name = args().skip(1).nth(0).expect("Input file name argument missing");
     let output_file_name = args().skip(1).nth(1).expect("Output file name argument missing");
-    let report_file_name = args().skip(1).nth(2).expect("Report file name argument missing");
-    let profile_name = args().skip(1).nth(3).expect("Profile argument missing");
+    let final_coder_state_output_file_name = args().skip(1).nth(2).expect("Final coder state output file name argument missing");
+    let report_file_name = args().skip(1).nth(3).expect("Report file name argument missing");
+    let profile_name = args().skip(1).nth(4).expect("Profile argument missing");
 
     // Read input file
     let input = {
@@ -88,7 +89,7 @@ fn main() {
     println!();
 
     // Decompression check
-    let decompressed = decompress(&compressed, encoded_packets.len());
+    let decompressed = decompress(&compressed, encoded_packets.len(), final_coder_state);
     if decompressed == input {
         println!("Decompression check OK");
         println!();
@@ -99,6 +100,10 @@ fn main() {
     // Write output
     File::create(&output_file_name).expect("Couldn't open output file").write(&compressed).expect("Couldn't write output file");
     println!("Output written to {}", output_file_name);
+
+    // Write output
+    File::create(&final_coder_state_output_file_name).expect("Couldn't open output file").write(&[final_coder_state as u8, (final_coder_state >> 8) as u8]).expect("Couldn't write output file");
+    println!("Final coder state output written to {}", final_coder_state_output_file_name);
 
     // Write report
     generate_report(&report_file_name, &input, &encoded_packets);
@@ -455,10 +460,6 @@ fn encode_flush(state: &mut EncodeState) -> u32 {
         x = ((x / prediction) << PREDICTION_BITS) + (x % prediction) + bias;
     }
 
-    // Write final coder state
-    state.output.push(x as _);
-    state.output.push((x >> 8) as _);
-
     // Flush output bits
     for bit in state.output_bits.iter().cloned().rev() {
         if state.bit_buffer_pos == 8 {
@@ -487,21 +488,15 @@ struct DecodeState {
     input_pos: usize,
 }
 
-fn decompress(input: &[u8], num_packets: usize) -> Vec<u8> {
+fn decompress(input: &[u8], num_packets: usize, final_coder_state: u32) -> Vec<u8> {
     let mut state = DecodeState {
-        x_low: 0,
-        x_high: 0,
+        x_low: final_coder_state as _,
+        x_high: (final_coder_state >> 8) as _,
         model: Model::new(),
         bit_buffer: 0,
         bit_buffer_pos: 0,
         input_pos: 0,
     };
-
-    // Read initial state
-    state.x_low = input[state.input_pos];
-    state.input_pos += 1;
-    state.x_high = input[state.input_pos];
-    state.input_pos += 1;
 
     let mut output = Vec::new();
 

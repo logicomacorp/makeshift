@@ -2,6 +2,7 @@ target/
 makeshift.prg
 makeshift.sym
 packed-intro.bin
+final-coder-state.bin
 report.html
 intro.bin
 intro.sym
