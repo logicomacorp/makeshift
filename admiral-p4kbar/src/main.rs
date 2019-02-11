@@ -7,7 +7,7 @@ use std::time::Instant;
 const NORMALIZATION_INTERVAL_BITS: u32 = 15;
 const NORMALIZATION_INTERVAL_LOWER_BOUND: u32 = 1 << NORMALIZATION_INTERVAL_BITS;
 const PREDICTION_BITS: u32 = 8;
-const INITIAL_PREDICTIONS: u32 = 110;
+const INITIAL_PREDICTIONS: u8 = 110;
 const LEARNING_RATE: u32 = 4;
 
 const MATCH_LEN_BITS: u32 = 8;
@@ -127,7 +127,7 @@ fn main() {
 
 #[derive(Clone)]
 struct Model {
-    contexts: Vec<u32>,
+    contexts: Vec<u8>,
     last_match_offset: u32,
 }
 
@@ -164,9 +164,9 @@ impl Model {
 
     fn estimate_symbol_cost_bits(&self, symbol: u32, context: usize) -> f64 {
         let prediction = if symbol == 1 {
-            self.contexts[context]
+            self.contexts[context] as u32
         } else {
-            (1 << PREDICTION_BITS) - self.contexts[context]
+            (1 << PREDICTION_BITS) - (self.contexts[context] as u32)
         };
         -((prediction as f64) / ((1 << PREDICTION_BITS) as f64)).log2()
     }
@@ -193,12 +193,12 @@ impl Model {
 
     fn update(&mut self, symbol: u32, context: usize) {
         if symbol == 1 {
-            let mut adjustment = ((1 << PREDICTION_BITS) - self.contexts[context]) >> LEARNING_RATE;
+            let mut adjustment = (((1 << PREDICTION_BITS) - (self.contexts[context] as u32)) >> LEARNING_RATE) as u8;
             if adjustment == 0 {
                 adjustment = 1;
             }
             self.contexts[context] += adjustment;
-            if self.contexts[context] == 1 << PREDICTION_BITS {
+            if self.contexts[context] == 0 {
                 self.contexts[context] -= 1;
             }
         } else {
@@ -237,8 +237,8 @@ struct Arrival {
 
 struct EncodeState {
     model: Model,
-    symbols: Vec<(u32, u32)>,
-    output_bits: Vec<u32>,
+    symbols: Vec<(u8, u8)>,
+    output_bits: Vec<u8>,
     bit_buffer: u32,
     bit_buffer_pos: u32,
     output: Vec<u8>,
@@ -430,19 +430,22 @@ fn encode_write_bits(state: &mut EncodeState, value: u32, bits: u32, contexts: u
     for i in 0..bits {
         let symbol = (value >> (bits - 1 - i)) & 0x01;
         let context = contexts + (context_bits as usize);
-        encode_write_bit(state, symbol, state.model.contexts[context]);
+        encode_write_bit(state, symbol, state.model.contexts[context] as _);
         context_bits = (context_bits << 1) | symbol;
     }
 }
 
 fn encode_write_bit(state: &mut EncodeState, bit: u32, prediction: u32) {
-    state.symbols.push((bit, prediction));
+    state.symbols.push((bit as _, prediction as _));
 }
 
 fn encode_flush(state: &mut EncodeState) -> u32 {
     let mut x = NORMALIZATION_INTERVAL_LOWER_BOUND;
 
     for (bit, prediction) in state.symbols.iter().cloned().rev() {
+        let bit = bit as u32;
+        let prediction = prediction as u32;
+
         let (prediction, bias) = if bit == 1 {
             (prediction, 0)
         } else {
@@ -452,7 +455,7 @@ fn encode_flush(state: &mut EncodeState) -> u32 {
         // Renormalize
         let x_max = ((NORMALIZATION_INTERVAL_LOWER_BOUND >> PREDICTION_BITS) << 1) * prediction;
         while x >= x_max {
-            state.output_bits.push(x & 0x01);
+            state.output_bits.push((x & 0x01) as _);
             x >>= 1;
         }
 
@@ -468,7 +471,7 @@ fn encode_flush(state: &mut EncodeState) -> u32 {
             state.bit_buffer_pos = 0;
         }
 
-        state.bit_buffer |= bit << state.bit_buffer_pos;
+        state.bit_buffer |= (bit as u32) << state.bit_buffer_pos;
         state.bit_buffer_pos += 1;
     }
 
