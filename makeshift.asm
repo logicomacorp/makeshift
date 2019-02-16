@@ -209,7 +209,7 @@ decode_read_bits:
         sta read_bits_count
         stx decode_bits_contexts
         sty read_bits_low
-        sty read_bits_high
+        //sty read_bits_high // Since we always read at least 8 bits, we don't need to clear this actually
         sty context_low
         sty context_bits_high
         inc context_low
