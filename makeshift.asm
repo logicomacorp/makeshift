@@ -270,34 +270,33 @@ bit_0:
             sta prediction
 
 update_state:
-            // product = x_high * prediction (clobbers x_high)
+            // product = x_high * prediction (clobbers prediction)
             tya
             ldx #$08
             clc
 m0:         bcc m1
             clc
-            adc prediction
+            adc x_high
 m1:         ror
-            ror x_high
+            ror prediction
             dex
             bpl m0
-            sta temp
-            lda x_high
+            sta x_high
+            lda prediction
 
             // add back state low bits
             clc
             adc x_low
-            sta x_low
-            tya
-            adc temp
-            pha
+            tax
+            bcc !+
+                inc x_high
 
             // subtract bias
-            sec
-            lda x_low
+!:          sec
+            txa
             sbc bias
             sta x_low
-            pla
+            lda x_high
             sbc #$00
             sta x_high
 
